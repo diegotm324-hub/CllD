@@ -1,5 +1,5 @@
 // ==============================================================================
-// colld - Sistema Contable Cloud Multi-Tenant y Bimoneda (SUNAT & PCGE)
+// colld - Sistema Contable Multi-Empresa / Multi-RUC por Contador
 // ==============================================================================
 
 generator client {
@@ -12,10 +12,10 @@ datasource db {
 }
 
 // ------------------------------------------------------------------------------
-// ENUMS TRIBUTARIOS Y CONTABLES (Normativa SUNAT y PCGE)
+// ENUMS TRIBUTARIOS Y CONTABLES
 // ------------------------------------------------------------------------------
 
-enum TaxRegime {
+enum TaxRegimeEnum {
   GENERAL           // Régimen General (RG)
   MYPE_TRIBUTARIO   // Régimen MYPE Tributario (RMT)
   ESPECIAL_RER      // Régimen Especial de Renta (RER)
@@ -95,84 +95,118 @@ enum VoucherStatus {
 }
 
 // ------------------------------------------------------------------------------
-// MODELO DE USUARIOS (MULTI-TENANT AUTH)
+// 1. USUARIO (CONTADOR)
 // ------------------------------------------------------------------------------
 
 model User {
   id        String    @id @default(cuid())
   email     String    @unique
-  password  String
+  password  String    // Hasheada con bcrypt
   name      String
-  role      String    @default("ADMIN") // ADMIN, CONTADOR, ASISTENTE
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-
   companies Company[]
+  createdAt DateTime  @default(now())
 
   @@map("users")
 }
 
 // ------------------------------------------------------------------------------
-// EMPRESA MULTI-TENANT (RUC 11 DÍGITOS)
+// 2. EMPRESA (MULTI-TENANT / MULTI-RUC POR CONTADOR)
 // ------------------------------------------------------------------------------
 
 model Company {
-  id              String       @id @default(cuid())
-  ruc             String       @unique @db.VarChar(11) // RUC peruano validado con Módulo 11
-  businessName    String       @db.VarChar(255)        // Razón Social según Ficha RUC SUNAT
-  commercialName  String?      @db.VarChar(255)        // Nombre Comercial
-  tradeName       String?      @db.VarChar(255)        // Nombre Comercial (compatibilidad)
-  address         String?      @db.VarChar(300)        // Domicilio Fiscal
-  legalAddress    String?      @db.VarChar(300)        // Domicilio Fiscal (compatibilidad)
-  taxRegime       TaxRegime    @default(MYPE_TRIBUTARIO)
-  currency        CurrencyCode @default(PEN)
-  userId          String?
-  
-  // Indicadores de control fiscal SUNAT
-  isSireObligated Boolean      @default(true)
-  isRetentionAgent Boolean     @default(false)
-  isPerceptionAgent Boolean    @default(false)
-  isDetractionSubject Boolean  @default(true)
-  detractionAccount String?    @db.VarChar(20)
-  
-  phone           String?      @db.VarChar(30)
-  email           String?      @db.VarChar(100)
-  isActive        Boolean      @default(true)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  id              String           @id @default(cuid())
+  ruc             String           @db.VarChar(11)
+  businessName    String           // Razón Social
+  commercialName  String?
+  tradeName       String?          // Alias compatibilidad
+  address         String?          @db.VarChar(300)
+  legalAddress    String?          @db.VarChar(300)
+  taxRegime       String           @default("MYPE") // MYPE, Especial, General
+  currency        String           @default("PEN")
+  isActive        Boolean          @default(true)
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices        Invoice[]
+  journalEntries  JournalEntry[]
+  accounts        AccountPlan[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @default(now()) @updatedAt
 
-  user            User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
-  accountPlans    AccountPlan[]
+  // Relaciones de compatibilidad con transacciones y vouchers
   transactions    Transaction[]
-
-  // Compatibilidad con motor previo
   fiscalPeriods   FiscalPeriod[]
-  accounts        Account[]
+  accountsOld     Account[]
   entities        Entity[]
   costCenters     CostCenter[]
   subdiarios      Subdiario[]
   vouchers        Voucher[]
 
+  @@unique([ruc, userId]) // Un mismo usuario no duplica el mismo RUC
   @@index([ruc])
   @@index([userId])
   @@map("companies")
 }
 
 // ------------------------------------------------------------------------------
-// PLAN CONTABLE SIMPLIFICADO Y JERÁRQUICO (PCGE)
+// 3. INVOICE (COMPROBANTES DE VENTAS Y COMPRAS)
+// ------------------------------------------------------------------------------
+
+model Invoice {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  type        String   // 01: Factura, 03: Boleta
+  series      String
+  number      String
+  docRuc      String   // RUC/DNI del cliente o proveedor
+  docName     String   // Razón Social cliente/proveedor
+  operation   String   // VENTA o COMPRA
+  issueDate   DateTime
+  currency    String   @default("PEN") // PEN o USD
+  subtotal    Float
+  igv         Float
+  total       Float
+  createdAt   DateTime @default(now())
+
+  @@index([companyId])
+  @@index([issueDate])
+  @@index([operation])
+  @@map("invoices")
+}
+
+// ------------------------------------------------------------------------------
+// 4. JOURNAL ENTRY (LIBRO DIARIO Y ASIENTOS)
+// ------------------------------------------------------------------------------
+
+model JournalEntry {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  glosa       String
+  date        DateTime
+  debitTotal  Float
+  creditTotal Float
+  createdAt   DateTime @default(now())
+
+  @@index([companyId])
+  @@index([date])
+  @@map("journal_entries")
+}
+
+// ------------------------------------------------------------------------------
+// 5. ACCOUNT PLAN (PLAN CONTABLE PCGE)
 // ------------------------------------------------------------------------------
 
 model AccountPlan {
   id          String   @id @default(cuid())
-  code        String   @db.VarChar(15) // ej. '101', '1212', '40111', '6011', '70111'
-  name        String   @db.VarChar(200)
-  level       Int      @default(1) // 1 a 5
-  nature      String   @default("DEUDORA") // DEUDORA o ACREEDORA
   companyId   String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
   company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code        String   // Ej: 101, 121, 40111, 601, 701
+  name        String
+  level       Int?     @default(1)
+  nature      String?  @default("DEUDORA")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
 
   @@unique([companyId, code])
   @@index([companyId, code])
@@ -180,7 +214,7 @@ model AccountPlan {
 }
 
 // ------------------------------------------------------------------------------
-// TRANSACCIONES Y ASIENTOS (colld TRANSACTION ENGINE)
+// 6. MODELOS COMPATIBLES: TRANSACTIONS, VOUCHERS, TIPO DE CAMBIO
 // ------------------------------------------------------------------------------
 
 model Transaction {
@@ -191,7 +225,7 @@ model Transaction {
   glosa         String              @db.VarChar(500)
   currency      CurrencyCode        @default(PEN)
   exchangeRate  Decimal             @default(1.0000) @db.Decimal(10, 4)
-  status        String              @default("REGISTRADO") // REGISTRADO, ANULADO, BORRADOR
+  status        String              @default("REGISTRADO")
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 
@@ -209,7 +243,7 @@ model TransactionDetail {
   accountCode   String       @db.VarChar(15)
   debit         Decimal      @default(0.00) @db.Decimal(14, 2)
   credit        Decimal      @default(0.00) @db.Decimal(14, 2)
-  docType       String?      @db.VarChar(10) // 01 (Factura), 03 (Boleta), etc.
+  docType       String?      @db.VarChar(10)
   docSeries     String?      @db.VarChar(10)
   docNumber     String?      @db.VarChar(20)
   partyRuc      String?      @db.VarChar(15)
@@ -224,16 +258,12 @@ model TransactionDetail {
   @@map("transaction_details")
 }
 
-// ------------------------------------------------------------------------------
-// TABLA DE TIPOS DE CAMBIO HISTÓRICOS (SUNAT / SBS)
-// ------------------------------------------------------------------------------
-
 model ExchangeRate {
   id           String       @id @default(cuid())
   date         DateTime     @unique @db.Date
   currency     CurrencyCode @default(USD)
-  buyRate      Decimal      @default(3.7500) @db.Decimal(10, 4)
-  sellRate     Decimal      @default(3.7800) @db.Decimal(10, 4)
+  buyRate      Decimal      @default(3.7550) @db.Decimal(10, 4)
+  sellRate     Decimal      @default(3.7820) @db.Decimal(10, 4)
   purchaseRate Decimal?     @db.Decimal(10, 4)
   saleRate     Decimal?     @db.Decimal(10, 4)
   source       String       @default("SUNAT")
@@ -243,10 +273,6 @@ model ExchangeRate {
   @@index([date])
   @@map("exchange_rates")
 }
-
-// ------------------------------------------------------------------------------
-// MODELOS PREVIOS COMPATIBLES (FISCAL PERIOD, ACCOUNT, ENTITY, VOUCHERS)
-// ------------------------------------------------------------------------------
 
 model FiscalPeriod {
   id            String       @id @default(cuid())

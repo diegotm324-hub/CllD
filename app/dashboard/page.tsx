@@ -16,10 +16,12 @@ import {
   Sparkles,
 } from "lucide-react";
 import { getColldDashboardMetrics } from "@/app/actions/colld";
+import { NewCompanyModal } from "@/components/NewCompanyModal";
 
 export default function DashboardPage() {
   const [metrics, setMetrics] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   useEffect(() => {
     async function loadMetrics() {
@@ -33,6 +35,7 @@ export default function DashboardPage() {
     loadMetrics();
   }, []);
 
+  const hasCompany = metrics?.hasCompany !== false && !!metrics?.company;
   const totalSales = metrics?.totalSales || 0;
   const totalPurchases = metrics?.totalPurchases || 0;
   const fiscalCredit = metrics?.fiscalCreditIgv || 0;
@@ -41,8 +44,38 @@ export default function DashboardPage() {
 
   const maxVal = Math.max(
     ...monthlyFlow.map((m: any) => Math.max(m.ventas, m.compras)),
-    40000
+    1000
   );
+
+  // Pantalla de Bienvenida si no hay empresas registradas
+  if (!loading && !hasCompany) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 px-4 text-center max-w-lg mx-auto animate-in fade-in duration-300">
+        <div className="h-16 w-16 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-6 shadow-xl shadow-indigo-600/10">
+          <Building2 className="h-8 w-8" />
+        </div>
+        <h2 className="text-2xl font-bold tracking-tight text-white">
+          Bienvenido a colld
+        </h2>
+        <p className="text-sm text-zinc-400 mt-2">
+          Tu sistema contable multi-empresa y bimoneda en la nube. Para comenzar a emitir comprobantes y generar tu Libro Diario oficial, registra tu primer RUC.
+        </p>
+        <button
+          onClick={() => setIsModalOpen(true)}
+          className="mt-6 flex items-center gap-2 px-5 py-2.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 transition-all hover:scale-105"
+        >
+          <Plus className="h-4 w-4" />
+          Registrar Mi Primera Empresa / RUC
+        </button>
+
+        <NewCompanyModal
+          isOpen={isModalOpen}
+          onClose={() => setIsModalOpen(false)}
+          onCompanyCreated={() => window.location.reload()}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -58,11 +91,11 @@ export default function DashboardPage() {
             </span>
           </h1>
           <p className="text-xs text-zinc-400 mt-1">
-            Métricas financieras, tributarias y balances en tiempo real para{" "}
+            Métricas financieras y tributarias para{" "}
             <span className="text-zinc-200 font-medium">
               {metrics?.company?.businessName || "Empresa Activa"}
             </span>{" "}
-            (RUC {metrics?.company?.ruc || "10746979636"})
+            (RUC <strong className="text-white font-mono">{metrics?.company?.ruc}</strong> - {metrics?.company?.taxRegime})
           </p>
         </div>
 
@@ -103,7 +136,7 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-emerald-400">
               <ArrowUpRight className="h-3.5 w-3.5" />
-              <span>+18.4% vs mes anterior</span>
+              <span>Ventas netas facturadas</span>
             </div>
           </div>
         </div>
@@ -140,9 +173,9 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-1.5 mt-1.5 text-[11px]">
               {fiscalCredit >= 0 ? (
-                <span className="text-amber-400">IGV a Pagar (Mes 11)</span>
+                <span className="text-amber-400 font-medium">IGV a Pagar (Mes 11)</span>
               ) : (
-                <span className="text-emerald-400">Saldo a Favor (Crédito)</span>
+                <span className="text-emerald-400 font-medium">Saldo a Favor (Crédito)</span>
               )}
             </div>
           </div>
@@ -187,18 +220,18 @@ export default function DashboardPage() {
               Flujo Mensual Comparativo (Ventas vs. Compras)
             </h2>
             <p className="text-xs text-zinc-400 mt-0.5">
-              Evolución acumulada de facturación e imputaciones de costo en Soles (PEN)
+              Evolución acumulada en Soles (PEN) para {metrics?.company?.businessName}
             </p>
           </div>
           {/* Legend */}
           <div className="flex items-center gap-4 text-xs">
             <div className="flex items-center gap-1.5">
               <div className="h-3 w-3 rounded-sm bg-indigo-500"></div>
-              <span className="text-zinc-300">Ventas (70111)</span>
+              <span className="text-zinc-300">Ventas (701)</span>
             </div>
             <div className="flex items-center gap-1.5">
               <div className="h-3 w-3 rounded-sm bg-sky-500"></div>
-              <span className="text-zinc-300">Compras (6011)</span>
+              <span className="text-zinc-300">Compras (601)</span>
             </div>
           </div>
         </div>
@@ -206,21 +239,19 @@ export default function DashboardPage() {
         {/* Visual Bar Chart */}
         <div className="pt-4 pb-2 grid grid-cols-6 gap-3 sm:gap-6 items-end h-64 border-b border-zinc-800/80">
           {monthlyFlow.map((item: any, idx: number) => {
-            const hVentas = Math.min(100, Math.round((item.ventas / maxVal) * 100));
-            const hCompras = Math.min(100, Math.round((item.compras / maxVal) * 100));
+            const hVentas = maxVal > 0 ? Math.min(100, Math.round((item.ventas / maxVal) * 100)) : 0;
+            const hCompras = maxVal > 0 ? Math.min(100, Math.round((item.compras / maxVal) * 100)) : 0;
 
             return (
               <div key={idx} className="flex flex-col items-center gap-2 h-full justify-end group">
                 <div className="w-full flex items-end justify-center gap-1.5 h-full">
-                  {/* Ventas Bar */}
                   <div
-                    style={{ height: `${hVentas}%` }}
+                    style={{ height: `${Math.max(4, hVentas)}%` }}
                     className="w-1/2 max-w-[28px] bg-gradient-to-t from-indigo-600 to-indigo-400 rounded-t-md relative transition-all duration-300 group-hover:brightness-110"
                     title={`Ventas: S/ ${item.ventas.toLocaleString()}`}
                   ></div>
-                  {/* Compras Bar */}
                   <div
-                    style={{ height: `${hCompras}%` }}
+                    style={{ height: `${Math.max(4, hCompras)}%` }}
                     className="w-1/2 max-w-[28px] bg-gradient-to-t from-sky-600 to-sky-400 rounded-t-md relative transition-all duration-300 group-hover:brightness-110"
                     title={`Compras: S/ ${item.compras.toLocaleString()}`}
                   ></div>
@@ -234,7 +265,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex justify-between items-center text-xs text-zinc-500 font-mono">
-          <span>Base imponible acumulada del ejercicio 2026</span>
+          <span>Aislamiento 100% garantizado por RUC</span>
           <span>Actualizado en tiempo real</span>
         </div>
       </div>

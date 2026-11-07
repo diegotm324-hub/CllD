@@ -1,51 +1,97 @@
 "use server";
 
 import prisma from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { revalidatePath } from "next/cache";
 import { serializeDecimals } from "@/lib/utils/serialize";
 import { initializeCompanyPCGE } from "@/lib/accounting/pcgeSeed";
-import { revalidatePath } from "next/cache";
+import {
+  ACTIVE_COMPANY_COOKIE,
+  getActiveCompanyId,
+  getOrCreateDefaultUser,
+} from "@/lib/auth/activeCompany";
 
 // ------------------------------------------------------------------------------
-// 1. DASHBOARD METRICS
+// 1. SELECTOR Y CAMBIO DE EMPRESA ACTIVA (COOKIE PERSISTENTE)
 // ------------------------------------------------------------------------------
-export async function getColldDashboardMetrics(companyId?: string) {
+
+export async function switchActiveCompany(companyId: string) {
   try {
-    let targetCompany = null;
-    if (companyId) {
-      targetCompany = await prisma.company.findUnique({ where: { id: companyId } });
-    }
-    if (!targetCompany) {
-      targetCompany = await prisma.company.findFirst({ where: { isActive: true } });
-    }
-    if (!targetCompany) {
-      targetCompany = await prisma.company.findFirst();
+    const company = await prisma.company.findUnique({
+      where: { id: companyId },
+    });
+
+    if (!company) {
+      return { success: false, error: "Empresa no encontrada." };
     }
 
-    if (!targetCompany) {
+    const cookieStore = await cookies();
+    cookieStore.set(ACTIVE_COMPANY_COOKIE, companyId, {
+      path: "/",
+      maxAge: 60 * 60 * 24 * 365, // 1 año
+      sameSite: "lax",
+      httpOnly: false, // Accesible por cliente si es necesario
+    });
+
+    revalidatePath("/", "layout");
+    revalidatePath("/dashboard");
+    revalidatePath("/dashboard/comprobantes");
+    revalidatePath("/dashboard/libro-diario");
+    revalidatePath("/dashboard/empresas");
+
+    return { success: true, company: serializeDecimals(company) };
+  } catch (error) {
+    console.error("[COLLD ERROR switchActiveCompany]:", error);
+    return { success: false, error: String(error) };
+  }
+}
+
+// ------------------------------------------------------------------------------
+// 2. DASHBOARD METRICS AISLADAS POR EMPRESA
+// ------------------------------------------------------------------------------
+
+export async function getColldDashboardMetrics(explicitCompanyId?: string) {
+  try {
+    const targetCompanyId = explicitCompanyId || (await getActiveCompanyId());
+
+    if (!targetCompanyId) {
       return {
         success: true,
         data: {
+          hasCompany: false,
           company: null,
           totalSales: 0,
           totalPurchases: 0,
           fiscalCreditIgv: 0,
           exchangeRate: { buy: 3.755, sell: 3.782, date: new Date().toISOString() },
-          monthlyFlow: [
-            { month: "Jun", ventas: 12500, compras: 8200 },
-            { month: "Jul", ventas: 15400, compras: 9800 },
-            { month: "Ago", ventas: 18200, compras: 11300 },
-            { month: "Set", ventas: 16800, compras: 10400 },
-            { month: "Oct", ventas: 21500, compras: 13900 },
-            { month: "Nov", ventas: 24800, compras: 15600 },
-          ],
+          monthlyFlow: [],
         },
       };
     }
 
-    // Calcular totales de transacciones registradas
-    const transactions = await prisma.transaction.findMany({
-      where: { companyId: targetCompany.id, status: "REGISTRADO" },
-      include: { details: true },
+    const company = await prisma.company.findUnique({
+      where: { id: targetCompanyId },
+    });
+
+    if (!company) {
+      return {
+        success: true,
+        data: {
+          hasCompany: false,
+          company: null,
+          totalSales: 0,
+          totalPurchases: 0,
+          fiscalCreditIgv: 0,
+          exchangeRate: { buy: 3.755, sell: 3.782, date: new Date().toISOString() },
+          monthlyFlow: [],
+        },
+      };
+    }
+
+    // Consultas aisladas por empresa usando el modelo Invoice
+    const invoices = await prisma.invoice.findMany({
+      where: { companyId: targetCompanyId },
+      orderBy: { issueDate: "desc" },
     });
 
     let totalSales = 0;
@@ -53,51 +99,36 @@ export async function getColldDashboardMetrics(companyId?: string) {
     let igvVentas = 0;
     let igvCompras = 0;
 
-    for (const tx of transactions) {
-      for (const d of tx.details) {
-        const credit = Number(d.credit || 0);
-        const debit = Number(d.debit || 0);
-
-        // Ventas: Cuenta 70xxx
-        if (d.accountCode.startsWith("70")) {
-          totalSales += credit;
-        }
-        // Compras: Cuenta 60xxx
-        if (d.accountCode.startsWith("60") || d.accountCode.startsWith("63") || d.accountCode.startsWith("65")) {
-          totalPurchases += debit;
-        }
-        // IGV Ventas (Haber 40111)
-        if (d.accountCode.startsWith("4011") && credit > 0) {
-          igvVentas += credit;
-        }
-        // IGV Compras (Debe 40111 - Crédito Fiscal)
-        if (d.accountCode.startsWith("4011") && debit > 0) {
-          igvCompras += debit;
-        }
+    for (const inv of invoices) {
+      if (inv.operation === "VENTA") {
+        totalSales += inv.subtotal;
+        igvVentas += inv.igv;
+      } else {
+        totalPurchases += inv.subtotal;
+        igvCompras += inv.igv;
       }
     }
 
-    // Si la BD no tiene transacciones, proveer métricas reales basadas en vouchers previos
+    // Si no hay invoices, buscar en Transactions / Vouchers existentes
     if (totalSales === 0 && totalPurchases === 0) {
-      const vouchers = await prisma.voucher.findMany({
-        where: { companyId: targetCompany.id },
-        include: { items: true },
-        take: 50,
+      const txs = await prisma.transaction.findMany({
+        where: { companyId: targetCompanyId },
+        include: { details: true },
       });
 
-      for (const v of vouchers) {
-        for (const item of v.items) {
-          const credit = Number(item.creditPEN || 0);
-          const debit = Number(item.debitPEN || 0);
-          if (v.subdiarioId.includes("21") || credit > 0) {
-            totalSales += credit;
-          }
-          if (v.subdiarioId.includes("11") || debit > 0) {
-            totalPurchases += debit;
-          }
+      for (const tx of txs) {
+        for (const d of tx.details) {
+          const credit = Number(d.credit || 0);
+          const debit = Number(d.debit || 0);
+          if (d.accountCode.startsWith("70")) totalSales += credit;
+          if (d.accountCode.startsWith("60") || d.accountCode.startsWith("63")) totalPurchases += debit;
+          if (d.accountCode.startsWith("4011") && credit > 0) igvVentas += credit;
+          if (d.accountCode.startsWith("4011") && debit > 0) igvCompras += debit;
         }
       }
     }
+
+    const netIgv = igvVentas - igvCompras;
 
     // Obtener Tipo de Cambio SUNAT del día
     const latestTc = await prisma.exchangeRate.findFirst({
@@ -107,58 +138,48 @@ export async function getColldDashboardMetrics(companyId?: string) {
     const buyRate = latestTc ? Number(latestTc.buyRate || latestTc.purchaseRate || 3.755) : 3.755;
     const sellRate = latestTc ? Number(latestTc.sellRate || latestTc.saleRate || 3.782) : 3.782;
 
-    const netIgv = igvVentas - igvCompras;
-
     const data = {
+      hasCompany: true,
       company: {
-        id: targetCompany.id,
-        ruc: targetCompany.ruc,
-        businessName: targetCompany.businessName,
-        taxRegime: targetCompany.taxRegime,
-        currency: targetCompany.currency,
+        id: company.id,
+        ruc: company.ruc,
+        businessName: company.businessName,
+        commercialName: company.commercialName || company.tradeName,
+        taxRegime: company.taxRegime,
+        currency: company.currency,
       },
-      totalSales: totalSales > 0 ? totalSales : 38450.0,
-      totalPurchases: totalPurchases > 0 ? totalPurchases : 24120.0,
-      fiscalCreditIgv: netIgv !== 0 ? netIgv : 2579.4,
+      totalSales,
+      totalPurchases,
+      fiscalCreditIgv: netIgv,
       exchangeRate: {
         buy: buyRate,
         sell: sellRate,
         date: latestTc ? latestTc.date.toISOString().split("T")[0] : new Date().toISOString().split("T")[0],
       },
       monthlyFlow: [
-        { month: "Jun", ventas: 18500, compras: 12200 },
-        { month: "Jul", ventas: 21400, compras: 14800 },
-        { month: "Ago", ventas: 26200, compras: 17300 },
-        { month: "Set", ventas: 24800, compras: 16400 },
-        { month: "Oct", ventas: 31500, compras: 19900 },
-        { month: "Nov", ventas: totalSales > 0 ? totalSales : 38450, compras: totalPurchases > 0 ? totalPurchases : 24120 },
+        { month: "Jun", ventas: totalSales * 0.45, compras: totalPurchases * 0.4 },
+        { month: "Jul", ventas: totalSales * 0.6, compras: totalPurchases * 0.55 },
+        { month: "Ago", ventas: totalSales * 0.75, compras: totalPurchases * 0.7 },
+        { month: "Set", ventas: totalSales * 0.7, compras: totalPurchases * 0.65 },
+        { month: "Oct", ventas: totalSales * 0.85, compras: totalPurchases * 0.8 },
+        { month: "Nov", ventas: totalSales, compras: totalPurchases },
       ],
     };
 
     return { success: true, data: serializeDecimals(data) };
   } catch (error) {
-    console.error("[COLLD ERROR getDashboardMetrics]:", error);
-    return {
-      success: false,
-      error: String(error),
-      data: {
-        company: null,
-        totalSales: 0,
-        totalPurchases: 0,
-        fiscalCreditIgv: 0,
-        exchangeRate: { buy: 3.755, sell: 3.782, date: new Date().toISOString() },
-        monthlyFlow: [],
-      },
-    };
+    console.error("[COLLD ERROR getColldDashboardMetrics]:", error);
+    return { success: false, error: String(error) };
   }
 }
 
 // ------------------------------------------------------------------------------
-// 2. COMPROBANTES Y TRANSACCIONES CONTABLES
+// 3. COMPROBANTES DE PAGO (INVOICES)
 // ------------------------------------------------------------------------------
-export interface CreateComprobanteInput {
+
+export interface CreateInvoiceInput {
   operationType: "VENTA" | "COMPRA";
-  docType: "01" | "03" | "07" | "08"; // Factura, Boleta, NC, ND
+  docType: "01" | "03" | "07" | "08";
   docSeries: string;
   docNumber: string;
   partyRuc: string;
@@ -167,38 +188,68 @@ export interface CreateComprobanteInput {
   currency: "PEN" | "USD";
   exchangeRate: number;
   baseAmount: number;
-  generateAccountingEntry: boolean;
-  glosa?: string;
+  generateAccountingEntry?: boolean;
 }
 
-export async function createColldComprobante(companyId: string, input: CreateComprobanteInput) {
+export async function createColldComprobante(
+  companyIdParam?: string,
+  input?: CreateInvoiceInput
+) {
   try {
+    const targetCompanyId = companyIdParam || (await getActiveCompanyId());
+    if (!targetCompanyId || !input) {
+      return { success: false, error: "Empresa activa no identificada." };
+    }
+
     const base = Number(input.baseAmount);
     const igv = Math.round(base * 0.18 * 100) / 100;
     const total = Math.round((base + igv) * 100) / 100;
-    const tc = Number(input.exchangeRate) || 3.78;
 
+    // 1. Guardar en el modelo oficial Invoice
+    const invoice = await prisma.invoice.create({
+      data: {
+        companyId: targetCompanyId,
+        type: input.docType,
+        series: input.docSeries,
+        number: input.docNumber,
+        docRuc: input.partyRuc,
+        docName: input.partyName,
+        operation: input.operationType,
+        issueDate: new Date(input.date),
+        currency: input.currency,
+        subtotal: base,
+        igv: igv,
+        total: total,
+      },
+    });
+
+    // 2. Guardar en JournalEntry para el Libro Diario
+    const glosa = `${input.operationType === "VENTA" ? "VENTA" : "COMPRA"} ${input.docType}-${input.docSeries}-${input.docNumber} - ${input.partyName}`;
+    await prisma.journalEntry.create({
+      data: {
+        companyId: targetCompanyId,
+        glosa,
+        date: new Date(input.date),
+        debitTotal: total,
+        creditTotal: total,
+      },
+    });
+
+    // 3. Guardar en Transactions (motor relacional compatible)
     const voucherNumber = `${input.operationType === "VENTA" ? "V" : "C"}-${Date.now().toString().slice(-6)}`;
-    const glosa = input.glosa || `${input.operationType === "VENTA" ? "VENTA" : "COMPRA"} COMPROBANTE ${input.docType}-${input.docSeries}-${input.docNumber} - ${input.partyName}`;
-
-    // Crear Transacción en colld
     const tx = await prisma.transaction.create({
       data: {
-        companyId,
+        companyId: targetCompanyId,
         voucherNumber,
         date: new Date(input.date),
         glosa,
-        currency: input.currency,
-        exchangeRate: tc,
+        currency: input.currency as any,
+        exchangeRate: Number(input.exchangeRate) || 3.782,
         status: "REGISTRADO",
       },
     });
 
     if (input.operationType === "VENTA") {
-      // Asiento de Venta:
-      // 121 (Debe) Total
-      // 40111 (Haber) IGV
-      // 70111 (Haber) Base
       await prisma.transactionDetail.createMany({
         data: [
           {
@@ -225,7 +276,7 @@ export async function createColldComprobante(companyId: string, input: CreateCom
           },
           {
             transactionId: tx.id,
-            accountCode: "70111",
+            accountCode: "701",
             debit: 0,
             credit: base,
             docType: input.docType,
@@ -237,16 +288,11 @@ export async function createColldComprobante(companyId: string, input: CreateCom
         ],
       });
     } else {
-      // Asiento de Compra:
-      // 6011 (Debe) Base
-      // 40111 (Debe) IGV
-      // 421 (Haber) Total
-      // Amarre Automático de Destino: 20111 (Debe) vs 6111 (Haber)
       await prisma.transactionDetail.createMany({
         data: [
           {
             transactionId: tx.id,
-            accountCode: "6011",
+            accountCode: "601",
             debit: base,
             credit: 0,
             docType: input.docType,
@@ -277,29 +323,6 @@ export async function createColldComprobante(companyId: string, input: CreateCom
             partyRuc: input.partyRuc,
             partyName: input.partyName,
           },
-          // Destino automático
-          {
-            transactionId: tx.id,
-            accountCode: "20111",
-            debit: base,
-            credit: 0,
-            docType: input.docType,
-            docSeries: input.docSeries,
-            docNumber: input.docNumber,
-            partyRuc: input.partyRuc,
-            partyName: input.partyName,
-          },
-          {
-            transactionId: tx.id,
-            accountCode: "6111",
-            debit: 0,
-            credit: base,
-            docType: input.docType,
-            docSeries: input.docSeries,
-            docNumber: input.docNumber,
-            partyRuc: input.partyRuc,
-            partyName: input.partyName,
-          },
         ],
       });
     }
@@ -308,7 +331,7 @@ export async function createColldComprobante(companyId: string, input: CreateCom
     revalidatePath("/dashboard/libro-diario");
     revalidatePath("/dashboard");
 
-    return { success: true, transactionId: tx.id };
+    return { success: true, invoiceId: invoice.id };
   } catch (error) {
     console.error("[COLLD ERROR createColldComprobante]:", error);
     return { success: false, error: String(error) };
@@ -316,22 +339,55 @@ export async function createColldComprobante(companyId: string, input: CreateCom
 }
 
 export async function getColldComprobantes(
-  companyId: string,
+  explicitCompanyId?: string,
   filters?: { date?: string; docType?: string; currency?: string }
 ) {
   try {
-    const transactions = await prisma.transaction.findMany({
+    const targetCompanyId = explicitCompanyId || (await getActiveCompanyId());
+    if (!targetCompanyId) {
+      return { success: true, data: [] };
+    }
+
+    // 1. Consultar Invoices
+    const invoices = await prisma.invoice.findMany({
       where: {
-        companyId,
-        ...(filters?.currency ? { currency: filters.currency as any } : {}),
+        companyId: targetCompanyId,
+        ...(filters?.currency && filters.currency !== "ALL" ? { currency: filters.currency } : {}),
       },
+      orderBy: { issueDate: "desc" },
+      take: 100,
+    });
+
+    if (invoices.length > 0) {
+      const items = invoices.map((inv) => ({
+        id: inv.id,
+        voucherNumber: `${inv.series}-${inv.number}`,
+        operationType: inv.operation,
+        date: inv.issueDate.toISOString().split("T")[0],
+        currency: inv.currency,
+        exchangeRate: 3.782,
+        docType: inv.type,
+        docSeries: inv.series,
+        docNumber: inv.number,
+        partyRuc: inv.docRuc,
+        partyName: inv.docName,
+        baseAmount: inv.subtotal,
+        igvAmount: inv.igv,
+        totalAmount: inv.total,
+        status: "REGISTRADO",
+      }));
+      return { success: true, data: serializeDecimals(items) };
+    }
+
+    // 2. Fallback a Transactions
+    const txs = await prisma.transaction.findMany({
+      where: { companyId: targetCompanyId },
       include: { details: true },
       orderBy: { date: "desc" },
       take: 100,
     });
 
-    const items = transactions.map((tx) => {
-      // Detectar si es venta o compra
+    const fallbackItems = txs.map((tx) => {
       const isVenta = tx.details.some((d) => d.accountCode.startsWith("70") || d.accountCode.startsWith("12"));
       const party = tx.details.find((d) => d.partyName || d.partyRuc);
       const detailWithDoc = tx.details.find((d) => d.docNumber);
@@ -367,7 +423,7 @@ export async function getColldComprobantes(
       };
     });
 
-    return { success: true, data: serializeDecimals(items) };
+    return { success: true, data: serializeDecimals(fallbackItems) };
   } catch (error) {
     console.error("[COLLD ERROR getColldComprobantes]:", error);
     return { success: false, error: String(error), data: [] };
@@ -375,22 +431,24 @@ export async function getColldComprobantes(
 }
 
 // ------------------------------------------------------------------------------
-// 3. LIBRO DIARIO Y ASIENTOS (PARTIDA DOBLE EN TIEMPO REAL)
+// 4. LIBRO DIARIO Y ASIENTOS (JOURNAL ENTRIES)
 // ------------------------------------------------------------------------------
-export async function getColldLibroDiario(companyId: string) {
+
+export async function getColldLibroDiario(explicitCompanyId?: string) {
   try {
-    const transactions = await prisma.transaction.findMany({
-      where: { companyId },
-      include: {
-        details: {
-          orderBy: { debit: "desc" },
-        },
-      },
+    const targetCompanyId = explicitCompanyId || (await getActiveCompanyId());
+    if (!targetCompanyId) {
+      return { success: true, data: [] };
+    }
+
+    const txs = await prisma.transaction.findMany({
+      where: { companyId: targetCompanyId },
+      include: { details: true },
       orderBy: { date: "desc" },
       take: 100,
     });
 
-    const entries = transactions.map((tx) => {
+    const entries = txs.map((tx) => {
       const sumDebit = tx.details.reduce((acc, d) => acc + Number(d.debit || 0), 0);
       const sumCredit = tx.details.reduce((acc, d) => acc + Number(d.credit || 0), 0);
       const isBalanced = Math.abs(sumDebit - sumCredit) < 0.01;
@@ -427,46 +485,59 @@ export async function getColldLibroDiario(companyId: string) {
   }
 }
 
-export interface ManualAsientoLine {
-  accountCode: string;
-  debit: number;
-  credit: number;
-  glosa?: string;
-  partyRuc?: string;
-  partyName?: string;
-}
-
 export async function createColldManualAsiento(
-  companyId: string,
+  explicitCompanyId: string | undefined,
   data: {
     date: string;
     glosa: string;
     currency: "PEN" | "USD";
     exchangeRate: number;
-    lines: ManualAsientoLine[];
+    lines: Array<{
+      accountCode: string;
+      debit: number;
+      credit: number;
+      partyName?: string;
+      partyRuc?: string;
+    }>;
   }
 ) {
   try {
+    const targetCompanyId = explicitCompanyId || (await getActiveCompanyId());
+    if (!targetCompanyId) {
+      return { success: false, error: "Empresa activa no identificada." };
+    }
+
     const sumDebit = data.lines.reduce((acc, l) => acc + Number(l.debit || 0), 0);
     const sumCredit = data.lines.reduce((acc, l) => acc + Number(l.credit || 0), 0);
 
     if (Math.abs(sumDebit - sumCredit) >= 0.01) {
       return {
         success: false,
-        error: `Desbalance en Partida Doble: Total Debe (S/ ${sumDebit.toFixed(2)}) no es igual a Total Haber (S/ ${sumCredit.toFixed(2)}).`,
+        error: `Desbalance: Debe (S/ ${sumDebit.toFixed(2)}) no es igual a Haber (S/ ${sumCredit.toFixed(2)}).`,
       };
     }
 
-    const voucherNumber = `D-${Date.now().toString().slice(-6)}`;
+    // 1. Guardar en JournalEntry
+    await prisma.journalEntry.create({
+      data: {
+        companyId: targetCompanyId,
+        glosa: data.glosa,
+        date: new Date(data.date),
+        debitTotal: sumDebit,
+        creditTotal: sumCredit,
+      },
+    });
 
+    // 2. Guardar en Transaction y Details
+    const voucherNumber = `D-${Date.now().toString().slice(-6)}`;
     const tx = await prisma.transaction.create({
       data: {
-        companyId,
+        companyId: targetCompanyId,
         voucherNumber,
         date: new Date(data.date),
         glosa: data.glosa,
-        currency: data.currency,
-        exchangeRate: Number(data.exchangeRate) || 3.78,
+        currency: data.currency as any,
+        exchangeRate: Number(data.exchangeRate) || 3.782,
         status: "REGISTRADO",
       },
     });
@@ -493,23 +564,35 @@ export async function createColldManualAsiento(
 }
 
 // ------------------------------------------------------------------------------
-// 4. GESTIÓN MULTI-TENANT DE EMPRESAS
+// 5. GESTIÓN MULTI-TENANT DE EMPRESAS Y CREACIÓN
 // ------------------------------------------------------------------------------
+
 export async function getColldEmpresas() {
   try {
+    const user = await getOrCreateDefaultUser();
+
     const companies = await prisma.company.findMany({
+      where: { userId: user.id },
       include: {
         _count: {
           select: {
-            transactions: true,
-            accountPlans: true,
+            invoices: true,
+            journalEntries: true,
+            accounts: true,
           },
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: "asc" },
     });
 
-    return { success: true, data: serializeDecimals(companies) };
+    // También retornar el activeCompanyId actual
+    const activeId = await getActiveCompanyId();
+
+    return {
+      success: true,
+      activeCompanyId: activeId,
+      data: serializeDecimals(companies),
+    };
   } catch (error) {
     console.error("[COLLD ERROR getColldEmpresas]:", error);
     return { success: false, error: String(error), data: [] };
@@ -520,58 +603,80 @@ export async function createColldEmpresa(data: {
   ruc: string;
   businessName: string;
   commercialName?: string;
-  taxRegime: "MYPE_TRIBUTARIO" | "ESPECIAL_RER" | "GENERAL" | "NUEVO_RUS";
+  taxRegime: "MYPE" | "ESPECIAL" | "GENERAL" | "MYPE_TRIBUTARIO" | "ESPECIAL_RER";
   address?: string;
   currency?: "PEN" | "USD";
 }) {
   try {
-    if (!data.ruc || data.ruc.length !== 11) {
+    const cleanRuc = data.ruc.trim();
+    if (!cleanRuc || cleanRuc.length !== 11) {
       return { success: false, error: "El RUC debe tener exactamente 11 dígitos numéricos." };
     }
 
-    // Crear la Empresa
+    const user = await getOrCreateDefaultUser();
+
+    // Normalizar Régimen
+    let regime = "MYPE";
+    if (data.taxRegime.includes("ESPECIAL")) regime = "Especial";
+    if (data.taxRegime.includes("GENERAL")) regime = "General";
+
+    // Crear Empresa asociada al Usuario
     const company = await prisma.company.create({
       data: {
-        ruc: data.ruc,
-        businessName: data.businessName,
-        commercialName: data.commercialName || data.businessName,
-        tradeName: data.commercialName || data.businessName,
-        legalAddress: data.address || "DOMICILIO FISCAL NO REGISTRADO",
-        address: data.address || "DOMICILIO FISCAL NO REGISTRADO",
-        taxRegime: data.taxRegime as any,
-        currency: (data.currency as any) || "PEN",
+        ruc: cleanRuc,
+        businessName: data.businessName.trim(),
+        commercialName: data.commercialName?.trim() || data.businessName.trim(),
+        tradeName: data.commercialName?.trim() || data.businessName.trim(),
+        address: data.address?.trim() || "DOMICILIO FISCAL NO REGISTRADO",
+        legalAddress: data.address?.trim() || "DOMICILIO FISCAL NO REGISTRADO",
+        taxRegime: regime,
+        currency: data.currency || "PEN",
+        userId: user.id,
         isActive: true,
       },
     });
 
-    // Auto-inicialización del Plan Contable PCGE oficial para la nueva empresa
+    // Inicializar cuentas base del PCGE (101, 104, 121, 40111, 421, 601, 701)
     await initializeCompanyPCGE(company.id);
 
-    revalidatePath("/dashboard/empresas");
+    // Establecer la nueva empresa como activa en la cookie
+    const cookieStore = await cookies();
+    cookieStore.set(ACTIVE_COMPANY_COOKIE, company.id, {
+      path: "/",
+      maxAge: 60 * 60 * 24 * 365,
+      sameSite: "lax",
+    });
+
+    revalidatePath("/", "layout");
     revalidatePath("/dashboard");
+    revalidatePath("/dashboard/empresas");
 
     return { success: true, company: serializeDecimals(company) };
-  } catch (error) {
+  } catch (error: any) {
     console.error("[COLLD ERROR createColldEmpresa]:", error);
+    if (error?.code === "P2002") {
+      return { success: false, error: "Ya tienes una empresa registrada con este número de RUC." };
+    }
     return { success: false, error: String(error) };
   }
 }
 
-// ------------------------------------------------------------------------------
-// 5. OBTENER CUENTAS PCGE PARA SELECTORES
-// ------------------------------------------------------------------------------
-export async function getColldAccounts(companyId: string) {
+export async function getColldAccounts(explicitCompanyId?: string) {
   try {
+    const targetCompanyId = explicitCompanyId || (await getActiveCompanyId());
+    if (!targetCompanyId) {
+      return { success: true, data: [] };
+    }
+
     const accounts = await prisma.accountPlan.findMany({
-      where: { companyId },
+      where: { companyId: targetCompanyId },
       orderBy: { code: "asc" },
     });
 
     if (accounts.length === 0) {
-      // Si no tiene cuentas aún, inicializar PCGE
-      await initializeCompanyPCGE(companyId);
+      await initializeCompanyPCGE(targetCompanyId);
       const reloaded = await prisma.accountPlan.findMany({
-        where: { companyId },
+        where: { companyId: targetCompanyId },
         orderBy: { code: "asc" },
       });
       return { success: true, data: serializeDecimals(reloaded) };
