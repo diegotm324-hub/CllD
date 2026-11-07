@@ -3,7 +3,20 @@ import { PrismaClient, PeriodStatus, AccountLevel, AccountNature, AccountCurrenc
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log("🌱 Iniciando Seed de ContablePro...");
+  console.log("🌱 Iniciando Seed de colld...");
+
+  // 0. Usuario Administrador por Defecto
+  const adminUser = await prisma.user.upsert({
+    where: { email: "admin@colld.pe" },
+    update: {},
+    create: {
+      email: "admin@colld.pe",
+      name: "Administrador colld",
+      password: "admin_password_hash",
+      role: "ADMIN",
+    },
+  });
+  console.log(`✅ Usuario Admin configurado: ${adminUser.email}`);
 
   // 1. Empresa Principal vinculada a Clave SOL
   const solRuc = (process.env.SUNAT_RUC || "").trim() || "10746979636";
@@ -17,22 +30,66 @@ async function main() {
 
   const company = await prisma.company.upsert({
     where: { ruc: solRuc },
-    update: { isActive: true },
+    update: { isActive: true, userId: adminUser.id },
     create: {
       ruc: solRuc,
       businessName: isJuridica ? `EMPRESA RUC ${solRuc}` : `CONTRIBUYENTE RUC ${solRuc} (${solUser})`,
       tradeName: solUser,
+      commercialName: solUser,
       legalAddress: "DOMICILIO FISCAL DECLARADO ANTE SUNAT",
+      address: "DOMICILIO FISCAL DECLARADO ANTE SUNAT",
       taxRegime: isJuridica ? TaxRegime.MYPE_TRIBUTARIO : TaxRegime.ESPECIAL_RER,
       isSireObligated: true,
       isDetractionSubject: true,
       detractionAccount: "00-045-892147",
       phone: "(01) 640-9000",
-      email: "contacto@contablepro.pe",
+      email: "contacto@colld.pe",
       isActive: true,
+      userId: adminUser.id,
     },
   });
   console.log(`✅ Empresa configurada: ${company.businessName} (RUC: ${company.ruc})`);
+
+  // Tipo de Cambio Inicial SUNAT
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  await prisma.exchangeRate.upsert({
+    where: { date: today },
+    update: { buyRate: 3.755, sellRate: 3.782 },
+    create: {
+      date: today,
+      currency: "USD",
+      buyRate: 3.755,
+      sellRate: 3.782,
+      purchaseRate: 3.755,
+      saleRate: 3.782,
+      source: "SUNAT",
+    },
+  });
+  console.log("✅ Tipo de cambio SUNAT del día registrado (Compra: 3.755, Venta: 3.782).");
+
+  // Plan Contable Básico (PCGE)
+  const pcgeAccounts = [
+    { code: "101", name: "Caja", level: 3, nature: "DEUDORA" },
+    { code: "104", name: "Cuentas Corrientes en Instituciones Financieras", level: 3, nature: "DEUDORA" },
+    { code: "121", name: "Facturas, Boletas y Otros Comprobantes por Cobrar", level: 3, nature: "DEUDORA" },
+    { code: "40111", name: "IGV - Cuenta Propia", level: 5, nature: "ACREEDORA" },
+    { code: "4017", name: "Impuesto a la Renta", level: 4, nature: "ACREEDORA" },
+    { code: "421", name: "Facturas, Boletas y Otros Comprobantes por Pagar", level: 3, nature: "ACREEDORA" },
+    { code: "6011", name: "Mercaderías", level: 4, nature: "DEUDORA" },
+    { code: "6111", name: "Variación de Existencias - Mercaderías", level: 4, nature: "ACREEDORA" },
+    { code: "6911", name: "Costo de Ventas - Mercaderías", level: 4, nature: "DEUDORA" },
+    { code: "70111", name: "Ventas - Mercaderías", level: 5, nature: "ACREEDORA" },
+  ];
+
+  for (const acc of pcgeAccounts) {
+    await prisma.accountPlan.upsert({
+      where: { companyId_code: { companyId: company.id, code: acc.code } },
+      update: { name: acc.name, level: acc.level, nature: acc.nature },
+      create: { companyId: company.id, code: acc.code, name: acc.name, level: acc.level, nature: acc.nature },
+    });
+  }
+  console.log(`✅ ${pcgeAccounts.length} Cuentas maestras de AccountPlan (PCGE) insertadas.`);
 
   // 2. Periodo Fiscal 2026-11 (Noviembre 2026) en estado ABIERTO
   const period = await prisma.fiscalPeriod.upsert({

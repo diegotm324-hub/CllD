@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ContablePro - SaaS Contable Peruano de Alto Rendimiento",
-  description: "Sistema contable y tributario para el mercado peruano (SUNAT, PCGE, SIRE, PLE)",
+  title: "colld — Sistema Contable Cloud Multi-Tenant y Bimoneda",
+  description: "Plataforma contable y tributaria para el mercado peruano (SUNAT, PCGE, SIRE)",
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es" className="dark">
-      <body className="antialiased min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      <body className="antialiased min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
         {children}
       </body>
     </html>
