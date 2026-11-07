@@ -4,74 +4,29 @@ import React, { useState, useEffect } from "react";
 import {
   Building2,
   Plus,
-  ShieldCheck,
   CheckCircle2,
-  X,
-  Briefcase,
-  Layers,
   MapPin,
-  Calendar,
 } from "lucide-react";
-import { getColldEmpresas, createColldEmpresa } from "@/app/actions/colld";
+import { getColldEmpresas } from "@/app/actions/colld";
+import { ModalNewCompany } from "@/components/ModalNewCompany";
 
 export default function EmpresasPage() {
   const [companies, setCompanies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
 
-  const [form, setForm] = useState({
-    ruc: "",
-    businessName: "",
-    commercialName: "",
-    taxRegime: "MYPE_TRIBUTARIO" as "MYPE_TRIBUTARIO" | "ESPECIAL_RER" | "GENERAL" | "NUEVO_RUS",
-    address: "",
-    currency: "PEN" as "PEN" | "USD",
-  });
+  async function loadData() {
+    setLoading(true);
+    const res = await getColldEmpresas();
+    if (res.success && res.data) {
+      setCompanies(res.data);
+    }
+    setLoading(false);
+  }
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const res = await getColldEmpresas();
-      if (res.success && res.data) {
-        setCompanies(res.data);
-      }
-      setLoading(false);
-    }
-    load();
+    loadData();
   }, []);
-
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setErrorMsg("");
-    if (!form.ruc || form.ruc.length !== 11) {
-      setErrorMsg("El RUC debe tener exactamente 11 dígitos.");
-      return;
-    }
-
-    setSaving(true);
-    const res = await createColldEmpresa(form);
-    if (res.success) {
-      setIsModalOpen(false);
-      setForm({
-        ruc: "",
-        businessName: "",
-        commercialName: "",
-        taxRegime: "MYPE_TRIBUTARIO",
-        address: "",
-        currency: "PEN",
-      });
-      // Recargar lista
-      const updated = await getColldEmpresas();
-      if (updated.success && updated.data) {
-        setCompanies(updated.data);
-      }
-    } else {
-      setErrorMsg(res.error || "Error al crear la empresa");
-    }
-    setSaving(false);
-  }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -85,7 +40,7 @@ export default function EmpresasPage() {
             </span>
           </h1>
           <p className="text-xs text-zinc-400 mt-1">
-            Administración centralizada de contribuyentes, razones sociales y configuración contable SUNAT
+            Administración centralizada con consulta y validación automática de RUC ante SUNAT
           </p>
         </div>
 
@@ -147,149 +102,26 @@ export default function EmpresasPage() {
                 <div className="flex justify-between items-center">
                   <span className="text-zinc-500">Cuentas PCGE:</span>
                   <span className="font-mono text-indigo-400">
-                    {comp._count?.accountPlans || 10} Cuentas Activas
+                    {comp._count?.accounts || 10} Cuentas Activas
                   </span>
                 </div>
               </div>
 
               <div className="pt-2 text-[11px] text-zinc-500 flex items-center gap-1.5 truncate">
                 <MapPin className="h-3 w-3 shrink-0 text-zinc-600" />
-                <span className="truncate">{comp.address || comp.legalAddress || "Domicilio fiscal"}</span>
+                <span className="truncate">{comp.address || comp.legalAddress || "Domicilio fiscal declarado"}</span>
               </div>
             </div>
           ))
         )}
       </div>
 
-      {/* -------------------------------------------------------------------- */}
-      {/* MODAL: REGISTRAR NUEVA EMPRESA                                       */}
-      {/* -------------------------------------------------------------------- */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-lg rounded-2xl bg-zinc-950 border border-zinc-800 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900/50">
-              <div className="flex items-center gap-2">
-                <Building2 className="h-4 w-4 text-indigo-400" />
-                <h2 className="text-sm font-semibold text-white">Registrar Nueva Empresa</h2>
-              </div>
-              <button onClick={() => setIsModalOpen(false)} className="text-zinc-500 hover:text-white">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreate} className="p-6 space-y-4">
-              {errorMsg && (
-                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
-                  {errorMsg}
-                </div>
-              )}
-
-              {/* RUC */}
-              <div>
-                <label className="text-[11px] font-medium text-zinc-400">RUC de la Empresa (11 dígitos)</label>
-                <input
-                  type="text"
-                  required
-                  maxLength={11}
-                  value={form.ruc}
-                  onChange={(e) => setForm({ ...form, ruc: e.target.value.replace(/\D/g, "") })}
-                  placeholder="20123456789"
-                  className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              {/* Razón Social */}
-              <div>
-                <label className="text-[11px] font-medium text-zinc-400">Razón Social</label>
-                <input
-                  type="text"
-                  required
-                  value={form.businessName}
-                  onChange={(e) => setForm({ ...form, businessName: e.target.value })}
-                  placeholder="COMERCIALIZADORA DEL PERU S.A.C."
-                  className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              {/* Nombre Comercial */}
-              <div>
-                <label className="text-[11px] font-medium text-zinc-400">Nombre Comercial (Opcional)</label>
-                <input
-                  type="text"
-                  value={form.commercialName}
-                  onChange={(e) => setForm({ ...form, commercialName: e.target.value })}
-                  placeholder="GRUPO COMERCIAL"
-                  className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              {/* Régimen Tributario y Moneda */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-400">Régimen Tributario</label>
-                  <select
-                    value={form.taxRegime}
-                    onChange={(e) => setForm({ ...form, taxRegime: e.target.value as any })}
-                    className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="MYPE_TRIBUTARIO">MYPE Tributario</option>
-                    <option value="ESPECIAL_RER">Especial (RER)</option>
-                    <option value="GENERAL">Régimen General</option>
-                    <option value="NUEVO_RUS">Nuevo RUS</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[11px] font-medium text-zinc-400">Moneda Base</label>
-                  <select
-                    value={form.currency}
-                    onChange={(e) => setForm({ ...form, currency: e.target.value as any })}
-                    className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="PEN">PEN (Soles)</option>
-                    <option value="USD">USD (Dólares)</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Domicilio Fiscal */}
-              <div>
-                <label className="text-[11px] font-medium text-zinc-400">Domicilio Fiscal</label>
-                <input
-                  type="text"
-                  value={form.address}
-                  onChange={(e) => setForm({ ...form, address: e.target.value })}
-                  placeholder="AV. JAVIER PRADO ESTE 1234, SAN ISIDRO, LIMA"
-                  className="w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              {/* PCGE Notice */}
-              <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-[11px] flex items-center gap-2">
-                <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <span>Al crear la empresa, se inicializará automáticamente el Plan Contable PCGE oficial con cuentas 101, 104, 121, 40111, 421, 6011, 70111 y sus amarres.</span>
-              </div>
-
-              {/* Buttons */}
-              <div className="flex justify-end gap-2 pt-3 border-t border-zinc-850">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 text-xs font-medium rounded-md bg-zinc-900 text-zinc-400 border border-zinc-800"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-5 py-2 text-xs font-semibold rounded-md bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/30 disabled:opacity-50"
-                >
-                  {saving ? "Creando e Inicializando..." : "Crear Empresa"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Modal con Autocompletado SUNAT */}
+      <ModalNewCompany
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onCompanyCreated={loadData}
+      />
     </div>
   );
 }
