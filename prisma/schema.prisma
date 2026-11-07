@@ -1,0 +1,409 @@
+// ==============================================================================
+// ContablePro - SaaS Contable Peruano de Alto Rendimiento
+// Arquitectura de Datos Relacional Multi-Empresa con Soporte PCGE, SUNAT, SIRE y PLE
+// ==============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ------------------------------------------------------------------------------
+// ENUMS TRIBUTARIOS Y CONTABLES (Normativa SUNAT y PCGE)
+// ------------------------------------------------------------------------------
+
+enum TaxRegime {
+  GENERAL           // Régimen General (RG)
+  MYPE_TRIBUTARIO   // Régimen MYPE Tributario (RMT)
+  ESPECIAL_RER      // Régimen Especial de Renta (RER)
+  NUEVO_RUS         // Nuevo Régimen Único Simplificado (NRUS)
+}
+
+enum PeriodStatus {
+  ABIERTO     // Permite registro y modificación de asientos
+  CERRADO     // Período cerrado contable y tributariamente
+  BLOQUEADO   // Período congelado temporalmente para auditoría / declaración SIRE
+}
+
+enum AccountLevel {
+  ELEMENTO          // 1 dígito  (ej: 6)
+  CUENTA            // 2 dígitos (ej: 63)
+  SUBCUENTA         // 3 dígitos (ej: 631)
+  DIVISIONARIA      // 4 dígitos (ej: 6311)
+  SUBDIVISIONARIA   // 5+ dígitos (ej: 63111)
+}
+
+enum AccountNature {
+  DEUDORA   // Activo (1, 2, 3), Gastos por Naturaleza (6), Costos/Gastos Función (9)
+  ACREEDORA // Pasivo (4), Patrimonio (5), Ingresos (7)
+}
+
+enum AccountCurrency {
+  PEN   // Exclusiva en Soles
+  USD   // Exclusiva en Dólares
+  BOTH  // Bimoneda indistinta
+}
+
+enum CurrencyCode {
+  PEN   // Sol peruano
+  USD   // Dólar estadounidense
+}
+
+enum ExchangeRateType {
+  COMPRA    // TC Compra SUNAT / SBS
+  VENTA     // TC Venta SUNAT / SBS
+  ESPECIAL  // TC Acordado en contrato / bancario específico
+}
+
+enum DocumentType {
+  OTROS_0                   // 0: Otros
+  DNI_1                     // 1: Documento Nacional de Identidad
+  CARNET_EXTRANJERIA_4      // 4: Carnet de Extranjería
+  RUC_6                     // 6: Registro Único de Contribuyentes
+  PASAPORTE_7               // 7: Pasaporte
+  CEDULA_DIPLOMATICA_A      // A: Cédula Diplomática
+}
+
+enum SunatComprobanteType {
+  FACTURA_01                     // 01: Factura
+  RECIBO_HONORARIOS_02           // 02: Recibo por Honorarios
+  BOLETA_03                      // 03: Boleta de Venta
+  LIQUIDACION_COMPRA_04          // 04: Liquidación de Compra
+  BOLETO_TRANSPORTE_AEREO_05     // 05: Boleto de transporte aéreo
+  CARTA_PORTE_AEREO_06           // 06: Carta de porte aéreo
+  NOTA_CREDITO_07                // 07: Nota de Crédito
+  NOTA_DEBITO_08                 // 08: Nota de Débito
+  GUIA_REMISION_REMITENTE_09     // 09: Guía de Remisión Remitente
+  TICKET_MAQUINA_REGISTRADORA_12 // 12: Ticket de máquina registradora
+  DOCUMENTO_BANCOS_13            // 13: Documentos emitidos por bancos y AFP
+  SERVICIOS_PUBLICOS_14          // 14: Recibo por servicios públicos (Luz, Agua, Teléfono)
+  BOLETO_TRANSPORTE_16           // 16: Boleto de viaje y transporte público
+  COMPROBANTE_RETENCION_20       // 20: Comprobante de Retención
+  COMPROBANTE_PERCEPCION_21       // 21: Comprobante de Percepción
+  GUIA_REMISION_TRANSPORTISTA_31 // 31: Guía de remisión del transportista
+  DECLARACION_ADUANERA_50        // 50: Declaración Aduanera de Mercancías (DAM / DUA)
+  OTROS_99                       // 99: Otros documentos autorizados
+}
+
+enum VoucherStatus {
+  BORRADOR    // En elaboración, descuadrado permitido temporalmente
+  REGISTRADO  // Firme, balanceado estrictamente Debe = Haber
+  ANULADO     // Sin efecto contable pero conserva correlativo e historial de auditoría
+}
+
+// ------------------------------------------------------------------------------
+// MODELO RELACIONAL MULTI-EMPRESA Y GESTIÓN DE PERIODOS
+// ------------------------------------------------------------------------------
+
+model Company {
+  id              String       @id @default(cuid())
+  ruc             String       @unique @db.VarChar(11) // RUC peruano validado con Módulo 11
+  businessName    String       @db.VarChar(255)        // Razón Social según Ficha RUC SUNAT
+  tradeName       String?      @db.VarChar(255)        // Nombre Comercial
+  legalAddress    String       @db.VarChar(300)        // Domicilio Fiscal
+  taxRegime       TaxRegime    @default(MYPE_TRIBUTARIO)
+  
+  // Indicadores de control fiscal SUNAT
+  isSireObligated Boolean      @default(true)          // Obligado a SIRE Compras / Ventas
+  isRetentionAgent Boolean     @default(false)         // Designado Agente de Retención
+  isPerceptionAgent Boolean    @default(false)         // Designado Agente de Percepción
+  isDetractionSubject Boolean  @default(true)          // Operaciones sujetas a SPOT (Banco de la Nación)
+  detractionAccount String?    @db.VarChar(20)         // Nro de Cta Corriente Banco de la Nación
+  
+  // Metadatos y auditoría
+  phone           String?      @db.VarChar(30)
+  email           String?      @db.VarChar(100)
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  // Relaciones del ecosistema contable de la empresa
+  fiscalPeriods   FiscalPeriod[]
+  accounts        Account[]
+  entities        Entity[]
+  costCenters     CostCenter[]
+  subdiarios      Subdiario[]
+  vouchers        Voucher[]
+
+  @@index([ruc])
+  @@map("companies")
+}
+
+model FiscalPeriod {
+  id            String       @id @default(cuid())
+  companyId     String
+  year          Int          // Ejercicio (ej: 2025, 2026)
+  month         Int          // 0 = Apertura, 1..12 = Enero a Diciembre, 13 = Cierre
+  status        PeriodStatus @default(ABIERTO)
+  
+  closedAt      DateTime?
+  closedBy      String?      // Usuario que efectuó el cierre mensual
+  
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  company       Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  vouchers      Voucher[]
+
+  @@unique([companyId, year, month])
+  @@index([companyId, year])
+  @@map("fiscal_periods")
+}
+
+// ------------------------------------------------------------------------------
+// PLAN CONTABLE GENERAL EMPRESARIAL (PCGE JERÁRQUICO)
+// ------------------------------------------------------------------------------
+
+model Account {
+  id                      String          @id @default(cuid())
+  companyId               String
+  code                    String          @db.VarChar(15)  // Código contable (ej: "10111", "63111", "70111")
+  name                    String          @db.VarChar(200) // Denominación de la cuenta
+  level                   AccountLevel
+  nature                  AccountNature
+  currency                AccountCurrency @default(BOTH)
+  
+  // Reglas de imputación estricta
+  allowsMovement          Boolean         @default(false)  // true ÚNICAMENTE para cuentas hoja
+  requiresEntity          Boolean         @default(false)  // true para cuentas de pasivo/activo comercial (12, 14, 16, 42, 44, 46, etc.)
+  requiresCostCenter      Boolean         @default(false)  // true para cuentas de gastos (Clase 6 y 9)
+  requiresDocRef          Boolean         @default(false)  // true si exige Tipo, Serie y Correlativo de comprobante
+  
+  // Regla de Amarres Automáticos de la Clase 6 (Gastos por Naturaleza -> Clase 9 vs 791/792)
+  hasAutomaticDestination Boolean         @default(false)
+  destinationDebitAccountId  String?      // ID de la cuenta Clase 9 a debitar (ej: 941 Gastos Adm, 951 Gastos Vtas)
+  destinationCreditAccountId String?      // ID de la cuenta Clase 79 a acreditar (ej: 791 Cargas Imp. Costos y Gastos)
+
+  // Relaciones jerárquicas del árbol PCGE
+  parentAccountId         String?
+  parentAccount           Account?        @relation("PCGEHierarchy", fields: [parentAccountId], references: [id], onDelete: Restrict)
+  children                Account[]       @relation("PCGEHierarchy")
+
+  // Relaciones de destino contable
+  destinationDebitAccount  Account?       @relation("AccountDebitDestiny", fields: [destinationDebitAccountId], references: [id], onDelete: Restrict)
+  destinationCreditAccount Account?       @relation("AccountCreditDestiny", fields: [destinationCreditAccountId], references: [id], onDelete: Restrict)
+  
+  sourceDebitDestinations  Account[]      @relation("AccountDebitDestiny")
+  sourceCreditDestinations Account[]      @relation("AccountCreditDestiny")
+
+  isActive                Boolean         @default(true)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+
+  company                 Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  voucherItems            VoucherItem[]
+
+  @@unique([companyId, code])
+  @@index([companyId, allowsMovement])
+  @@index([companyId, code])
+  @@map("accounts")
+}
+
+// ------------------------------------------------------------------------------
+// ANEXOS / ENTIDADES (Proveedores, Clientes, Empleados, Bancos, Accionistas)
+// ------------------------------------------------------------------------------
+
+model Entity {
+  id              String       @id @default(cuid())
+  companyId       String
+  docType         DocumentType @default(RUC_6)
+  docNumber       String       @db.VarChar(15) // RUC (11), DNI (8), CE o Pasaporte
+  businessName    String       @db.VarChar(255)
+  tradeName       String?      @db.VarChar(255)
+  address         String?      @db.VarChar(300)
+  
+  // Información de validación padrón SUNAT
+  sunatState      String       @default("ACTIVO") // ACTIVO, BAJA DE OFICIO, SUSPENSION TEMPORAL, etc.
+  sunatCondition  String       @default("HABIDO") // HABIDO, NO HABIDO, NO HALLADO
+  isGoodTaxpayer  Boolean      @default(false)    // Padrón de Buenos Contribuyentes
+  isRetentionAgent Boolean     @default(false)    // Padrón de Agentes de Retención
+  isRelatedParty  Boolean      @default(false)    // Parte vinculada económica
+  
+  // Bancario para Pagos / Detracciones
+  bankAccountPEN  String?      @db.VarChar(34)
+  bankAccountUSD  String?      @db.VarChar(34)
+  detractionAccount String?    @db.VarChar(20)    // Nro Cuenta Banco de la Nación para SPOT
+  
+  phone           String?      @db.VarChar(30)
+  email           String?      @db.VarChar(100)
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  company         Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  voucherItems    VoucherItem[]
+
+  @@unique([companyId, docType, docNumber])
+  @@index([companyId, docNumber])
+  @@index([companyId, businessName])
+  @@map("entities")
+}
+
+// ------------------------------------------------------------------------------
+// CENTROS DE COSTOS (Distribución funcional para Clase 9)
+// ------------------------------------------------------------------------------
+
+model CostCenter {
+  id          String        @id @default(cuid())
+  companyId   String
+  code        String        @db.VarChar(20) // Ej: "100", "100.01", "ADM-01", "OP-PLANT"
+  name        String        @db.VarChar(150)
+  description String?       @db.VarChar(255)
+  parentId    String?
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  voucherItems VoucherItem[]
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("cost_centers")
+}
+
+// ------------------------------------------------------------------------------
+// TABLA DE TIPOS DE CAMBIO HISTÓRICOS (SUNAT / SBS)
+// ------------------------------------------------------------------------------
+
+model ExchangeRate {
+  id           String       @id @default(cuid())
+  date         DateTime     @db.Date
+  currency     CurrencyCode @default(USD)
+  purchaseRate Decimal      @db.Decimal(10, 4) // TC Compra SUNAT/SBS con 4 decimales
+  saleRate     Decimal      @db.Decimal(10, 4) // TC Venta SUNAT/SBS con 4 decimales
+  source       String       @default("SUNAT")  // SUNAT, SBS, BANCO_NACION
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@unique([date, currency])
+  @@index([date])
+  @@map("exchange_rates")
+}
+
+// ------------------------------------------------------------------------------
+// SUBDIARIOS CONTABLES (Libros y Registros Auxiliares peruanos)
+// ------------------------------------------------------------------------------
+
+model Subdiario {
+  id                 String    @id @default(cuid())
+  companyId          String
+  code               String    @db.VarChar(4)   // Ej: "01", "05", "11", "21", "31"
+  name               String    @db.VarChar(100) // Ej: "Registro de Compras", "Ventas", "Caja"
+  description        String?   @db.VarChar(255)
+  currentCorrelative Int       @default(0)      // Último correlativo generado para autonumeración
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  company            Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  vouchers           Voucher[]
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("subdiarios")
+}
+
+// ------------------------------------------------------------------------------
+// VOUCHER / ASIENTO CONTABLE (CABECERA)
+// Transacción ACID atómica obligatoria - Partida Doble Bimoneda
+// ------------------------------------------------------------------------------
+
+model Voucher {
+  id                     String           @id @default(cuid())
+  companyId              String
+  periodId               String
+  subdiarioId            String
+  voucherNumber          String           @db.VarChar(10)  // Correlativo mensual (ej: "050001", "110042")
+  date                   DateTime         @db.Date        // Fecha del asiento contable
+  currency               CurrencyCode     @default(PEN)   // Moneda de origen de la operación
+  exchangeRate           Decimal          @db.Decimal(10, 4) // TC aplicado al asiento
+  exchangeRateType       ExchangeRateType @default(VENTA) // Criterio: Venta (Compras/Gastos/Activos), Compra (Ventas/Pasivos)
+  glossary               String           @db.VarChar(500) // Glosa general del asiento
+  status                 VoucherStatus    @default(REGISTRADO)
+
+  // Totales acumulados calculados (Partida Doble)
+  totalDebitPEN          Decimal          @default(0.00) @db.Decimal(14, 2)
+  totalCreditPEN         Decimal          @default(0.00) @db.Decimal(14, 2)
+  totalDebitUSD          Decimal          @default(0.00) @db.Decimal(14, 2)
+  totalCreditUSD         Decimal          @default(0.00) @db.Decimal(14, 2)
+  
+  isBalanced             Boolean          @default(true)
+  hasAutomaticDestination Boolean         @default(false) // Flag indicador de si contiene líneas de amarre 6 a 9/79
+
+  // Módulo de procedencia
+  originModule           String           @default("MANUAL") // MANUAL, SIRE_COMPRAS, SIRE_VENTAS, BANCOS, PLANILLA, CIERRE
+  
+  // Auditoría
+  createdBy              String?          @db.VarChar(100)
+  updatedBy              String?          @db.VarChar(100)
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  company                Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  fiscalPeriod           FiscalPeriod     @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  subdiario              Subdiario        @relation(fields: [subdiarioId], references: [id], onDelete: Restrict)
+  items                  VoucherItem[]
+
+  @@unique([companyId, periodId, subdiarioId, voucherNumber])
+  @@index([companyId, date])
+  @@index([companyId, periodId])
+  @@index([companyId, subdiarioId])
+  @@map("vouchers")
+}
+
+// ------------------------------------------------------------------------------
+// VOUCHER ITEM / DETALLE DEL ASIENTO CONTABLE
+// Soporte de Cuentas Corrientes, Comprobantes de Pago y Amarres de Destino
+// ------------------------------------------------------------------------------
+
+model VoucherItem {
+  id                String                @id @default(cuid())
+  voucherId         String
+  lineNumber        Int                   // Secuencia en el asiento (1, 2, 3...)
+  accountId         String
+  entityId          String?               // Obligatorio si Account.requiresEntity
+  costCenterId      String?               // Obligatorio si Account.requiresCostCenter
+
+  // Referencia a Comprobante de Pago SUNAT (Tabla 10)
+  docType           SunatComprobanteType? // Ej: FACTURA_01, BOLETA_03, NOTA_CREDITO_07
+  docSeries         String?               @db.VarChar(10) // Ej: "F001", "E001", "0001"
+  docNumber         String?               @db.VarChar(20) // Ej: "00004512"
+  docDate           DateTime?             @db.Date        // Fecha de emisión del documento
+  docDueDate        DateTime?             @db.Date        // Fecha de vencimiento (para cuentas de provisión)
+
+  glossary          String                @db.VarChar(500) // Glosa específica del movimiento
+
+  // Importes Bimoneda con precisión monetaria exacta (Decimal 14, 2)
+  debitPEN          Decimal               @default(0.00) @db.Decimal(14, 2)
+  creditPEN         Decimal               @default(0.00) @db.Decimal(14, 2)
+  debitUSD          Decimal               @default(0.00) @db.Decimal(14, 2)
+  creditUSD         Decimal               @default(0.00) @db.Decimal(14, 2)
+
+  // Control de Amarres Automáticos de la Clase 6
+  isAutoDestination Boolean               @default(false) // true si fue generada por el cálculo de Clase 9 vs 79
+  originalItemId    String?               // ID de la línea de Clase 6 que la originó
+
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  voucher           Voucher               @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  account           Account               @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  entity            Entity?               @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  costCenter        CostCenter?           @relation(fields: [costCenterId], references: [id], onDelete: Restrict)
+  
+  originalItem      VoucherItem?          @relation("ItemDestinations", fields: [originalItemId], references: [id], onDelete: Cascade)
+  generatedItems    VoucherItem[]         @relation("ItemDestinations")
+
+  @@index([voucherId])
+  @@index([accountId])
+  @@index([entityId])
+  @@index([costCenterId])
+  @@index([docType, docSeries, docNumber])
+  @@map("voucher_items")
+}
